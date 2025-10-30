@@ -1,6 +1,6 @@
 from .datasets import SEMDataset, FlameFront2D
 from .plotting import Plot2D
-from .ML_models import MachineLearningModel, AutoEncoder, MLP, SNMLP, LinearCombo, SNLinearCombo, _Combo
+from .ML_models import MachineLearningModel, AutoEncoder, MLP, SNMLP, LinearCombo, SNLinearCombo, _Combo, VAE
 from .utils import _unwrap_scalar
 __all__ = [
     "SEMDataset", "FlameFront2D",
@@ -11,5 +11,6 @@ __all__ = [
     "MLP",
     "LinearCombo",
     "_unwrap_scalar",
-    "SNMLP"
+    "SNMLP",
+    "VAE"
     ]
