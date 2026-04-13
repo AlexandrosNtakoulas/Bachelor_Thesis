@@ -1,8 +1,8 @@
 # Time step control
 MULTI_TIME_STEP: True
-TIME_STEP: 270
-TIME_STEP_START: 290
-TIME_STEP_END: 300
+TIME_STEP: 300
+TIME_STEP_START: 300
+TIME_STEP_END: 305
 
 # Case parameters
 PHI: 0.40
@@ -30,14 +30,16 @@ EXTRUDE_LZ: null
 X_BBOX: [320.0, 380.0]
 Y_BBOX: [0.0, 25.0]
 Z_BBOX: [0.0, 0.0]
-NX: 800
-NY: 200
+NX: 400
+NY: 400
 NZ: 1
 GRID_MODE: "equal"
 GRID_GAIN: 1.0
 
 # Fields to interpolate ("all" or list of field names)
 FIELDS_TO_INTERPOLATE:
+  - "u"
+  - "v"
   - "t"
 
 # Progress variable output (computed from temperature field)

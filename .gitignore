@@ -1,6 +1,10 @@
 .venv*/
 .idea/
-*.egg-info/
-__pycache__/
 report_figures/
 data/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+dist/
+build/
+

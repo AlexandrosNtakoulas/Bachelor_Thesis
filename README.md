@@ -96,7 +96,7 @@ pip install pandas
 pip install matplotlib
 pip install scikit-learn
 pip install mpi4py
-pip install torch 
+pip install --index-url https://download.pytorch.org/whl/cpu torch
 pip install pyvista
 pip install pymech
 pip install tdqm

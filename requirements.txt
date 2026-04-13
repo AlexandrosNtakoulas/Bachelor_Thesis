@@ -4,7 +4,7 @@ pandas
 matplotlib
 scikit-learn
 mpi4py
-torch 
+--index-url https://download.pytorch.org/whl/cpu torch
 pyvista
 pymech
 tdqm

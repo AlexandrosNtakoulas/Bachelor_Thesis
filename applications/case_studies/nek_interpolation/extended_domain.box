@@ -1,0 +1,14 @@
+-2                      spatial dimension
+1                      number of fields
+#
+#    comments:   This is the box immediately behind the
+#                refined cylinder in Ugo's cyl+b.l. run.
+#
+#
+#========================================================
+#
+Box 1                         Pipe
+-200 -100                         Nelx  Nely
+0.0   450   1.0               x0  x1   ratio
+0.0   100   1.0               y0  y1   ratio
+v  ,O  ,A  ,W  ,   ,          BC's:  (cbx0, cbx1, cby0, cby1, cbz0, cbz1)
