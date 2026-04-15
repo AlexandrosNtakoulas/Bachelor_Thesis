@@ -1,7 +1,7 @@
 import h5py
 import numpy as np
 from pathlib import Path
-
+from dataclasses import dataclass
 from skimage import measure
 from phi.jax.flow import (
     Box,
@@ -95,17 +95,64 @@ class GSolver():
         v_field: Field,
     ) -> Field:
         """
-        Performs a single time step in the G-equation evolution
+        One explicit Euler step for the G-equation
+            G_t + u G_x + v G_y = S_d |grad G|
+        using first-order upwind advection + first-order Godunov for |grad G|.
         """
-        g_adv = advect.semi_lagrangian(g_field, v_field, dt)
+        phi = jnp.asarray(g_field.values.native(("x", "y")))
+        vel = jnp.asarray(v_field.values.native(("x", "y", "vector")))
 
-        grad = field.spatial_gradient(g_adv, at="center")
-        grad_norm = field.vec_length(grad)
+        u = vel[..., 0]
+        v = vel[..., 1]
 
-        sd = self._calculate_sd(g_adv)   # or constant field / scalar
-        g_new = g_adv + dt * sd * grad_norm
+        dmx, dpx, dmy, dpy = self._one_sided_derivatives(phi, self.dx, self.dy)
 
-        return g_new
+        adv = self._upwind_advection(dmx, dpx, dmy, dpy, u, v)
+
+        sd = self._calculate_sd(phi)
+        abs_grad = self._godunov_abs_grad_g_equation(phi, sd, self.dx, self.dy)
+
+        phi_new = phi - dt * (adv - sd * abs_grad)
+
+        return g_field.with_values(phimath.tensor(phi_new, spatial("x,y")))
+    
+
+    """
+    GODUNOV SCHEMES FOR G-EQUATION:
+    """
+
+    def _godunov_abs_grad_g_equation(
+        self,
+        phi: jnp.ndarray,
+        sd: jnp.ndarray,
+        dx: float,
+        dy: float,
+    ) -> jnp.ndarray:
+        """
+        First-order Godunov approximation of |grad phi| for
+            phi_t + u phi_x + v phi_y = sd |grad phi|
+
+        For sd >= 0:
+            sqrt( max(max(Dx-,0)^2, min(Dx+,0)^2)
+                + max(max(Dy-,0)^2, min(Dy+,0)^2) )
+
+        For sd < 0:
+            sqrt( max(min(Dx-,0)^2, max(Dx+,0)^2)
+                + max(min(Dy-,0)^2, max(Dy+,0)^2) )
+        """
+        dmx, dpx, dmy, dpy = self._one_sided_derivatives(phi, dx, dy)
+
+        gx_pos = jnp.maximum(jnp.maximum(dmx, 0.0) ** 2, jnp.minimum(dpx, 0.0) ** 2)
+        gy_pos = jnp.maximum(jnp.maximum(dmy, 0.0) ** 2, jnp.minimum(dpy, 0.0) ** 2)
+
+        gx_neg = jnp.maximum(jnp.minimum(dmx, 0.0) ** 2, jnp.maximum(dpx, 0.0) ** 2)
+        gy_neg = jnp.maximum(jnp.minimum(dmy, 0.0) ** 2, jnp.maximum(dpy, 0.0) ** 2)
+
+        use_pos = sd >= 0.0
+        gx = jnp.where(use_pos, gx_pos, gx_neg)
+        gy = jnp.where(use_pos, gy_pos, gy_neg)
+
+        return jnp.sqrt(gx + gy + 1.0e-12)
     
     def _one_sided_derivatives(
         self,
@@ -157,6 +204,10 @@ class GSolver():
         adv_y = v_pos * dmy + v_neg * dpy
 
         return adv_x + adv_y
+    
+    """
+    G - Equation solver utilities
+    """
     
     def _generate_signed_distance_field(self, field ,iso):
         """
@@ -339,73 +390,6 @@ class GSolver():
         curv = field.divergence(normal)
         return curv
     
-    # START CHECK
-        
-    def _smoothed_sign(self, phi0: jnp.ndarray, dx: float, dy: float, eps_factor: float = 1.0) -> jnp.ndarray:
-        dx = jnp.asarray(dx, dtype=phi0.dtype)
-        dy = jnp.asarray(dy, dtype=phi0.dtype)
-        eps = jnp.asarray(eps_factor, dtype=phi0.dtype) * jnp.minimum(dx, dy)
-        return phi0 / jnp.sqrt(phi0 * phi0 + eps * eps)
-
-    def _godunov_abs_grad_reinit(self, phi: jnp.ndarray, phi0: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
-        """
-        Godunov Hamiltonian for reinitialization PDE:
-            phi_tau + S(phi0) (|grad phi| - 1) = 0
-        """
-        dmx, dpx, dmy, dpy = self._one_sided_derivatives(phi, dx, dy)
-        s = self._smoothed_sign(phi0, dx, dy)
-
-        gx_pos = jnp.maximum(jnp.maximum(dmx, 0.0) ** 2, jnp.minimum(dpx, 0.0) ** 2)
-        gy_pos = jnp.maximum(jnp.maximum(dmy, 0.0) ** 2, jnp.minimum(dpy, 0.0) ** 2)
-
-        gx_neg = jnp.maximum(jnp.minimum(dmx, 0.0) ** 2, jnp.maximum(dpx, 0.0) ** 2)
-        gy_neg = jnp.maximum(jnp.minimum(dmy, 0.0) ** 2, jnp.maximum(dpy, 0.0) ** 2)
-
-        use_pos = s >= 0.0
-        gx = jnp.where(use_pos, gx_pos, gx_neg)
-        gy = jnp.where(use_pos, gy_pos, gy_neg)
-
-        return jnp.sqrt(gx + gy)
-
-    def _reinitialize_step(
-        self,
-        g_field: Field,
-        g0_field: Field,
-        dtau: float,
-        dx: float,
-        dy: float,
-    ) -> Field:
-        phi = g_field.values.native(("x", "y"))
-        phi0 = g0_field.values.native(("x", "y"))
-
-        s = self._smoothed_sign(phi0, dx, dy)
-        abs_grad = self._godunov_abs_grad_reinit(phi, phi0, dx, dy)
-        phi_new = phi - dtau * s * (abs_grad - 1.0)
-
-        return g_field.with_values(phimath.tensor(phi_new, spatial("x,y")))
-
-
-    def _reinitialize(
-        self,
-        g_field: Field,
-        dx: float,
-        dy: float,
-        *,
-        n_iters: int = 5,
-        dtau_factor: float = 0.3,
-    ) -> Field:
-        """
-        Sussman-type reinitialization.
-        Keeps the zero level set approximately fixed while driving |grad G| -> 1.
-        """
-        dtau = dtau_factor * min(dx, dy)
-        g0_field = g_field
-        g_re = g_field
-        for _ in range(n_iters):
-            g_re = self._reinitialize_step(g_re, g0_field, dtau, dx, dy)
-        return g_re
-    ### END CHECK
-
     def print_case_info(self):
         print(f"Case name: {self.CASE_NAME}")
         print(f"X-bounds: {self.x_bounds}")
@@ -499,6 +483,77 @@ def save_animation(
     anim.save(output_path, writer=PillowWriter(fps=fps))
     plt.close(fig)
 
+
+
+
+class SussmanReinitializer():
+    def __init__():
+        pass
+    def _smoothed_sign(self, phi0: jnp.ndarray, dx: float, dy: float, eps_factor: float = 1.0) -> jnp.ndarray:
+        dx = jnp.asarray(dx, dtype=phi0.dtype)
+        dy = jnp.asarray(dy, dtype=phi0.dtype)
+        eps = jnp.asarray(eps_factor, dtype=phi0.dtype) * jnp.minimum(dx, dy)
+        return phi0 / jnp.sqrt(phi0 * phi0 + eps * eps)
+
+    def _godunov_abs_grad_reinit(self, phi: jnp.ndarray, phi0: jnp.ndarray, dx: float, dy: float) -> jnp.ndarray:
+        """
+        Godunov Hamiltonian for reinitialization PDE:
+            phi_tau + S(phi0) (|grad phi| - 1) = 0
+        """
+        dmx, dpx, dmy, dpy = self._one_sided_derivatives(phi, dx, dy)
+        s = self._smoothed_sign(phi0, dx, dy)
+
+        gx_pos = jnp.maximum(jnp.maximum(dmx, 0.0) ** 2, jnp.minimum(dpx, 0.0) ** 2)
+        gy_pos = jnp.maximum(jnp.maximum(dmy, 0.0) ** 2, jnp.minimum(dpy, 0.0) ** 2)
+
+        gx_neg = jnp.maximum(jnp.minimum(dmx, 0.0) ** 2, jnp.maximum(dpx, 0.0) ** 2)
+        gy_neg = jnp.maximum(jnp.minimum(dmy, 0.0) ** 2, jnp.maximum(dpy, 0.0) ** 2)
+
+        use_pos = s >= 0.0
+        gx = jnp.where(use_pos, gx_pos, gx_neg)
+        gy = jnp.where(use_pos, gy_pos, gy_neg)
+
+        return jnp.sqrt(gx + gy)
+
+    def _reinitialize_step(
+        self,
+        g_field: Field,
+        g0_field: Field,
+        dtau: float,
+        dx: float,
+        dy: float,
+    ) -> Field:
+        phi = g_field.values.native(("x", "y"))
+        phi0 = g0_field.values.native(("x", "y"))
+
+        s = self._smoothed_sign(phi0, dx, dy)
+        abs_grad = self._godunov_abs_grad_reinit(phi, phi0, dx, dy)
+        phi_new = phi - dtau * s * (abs_grad - 1.0)
+
+        return g_field.with_values(phimath.tensor(phi_new, spatial("x,y")))
+
+
+    def _reinitialize(
+        self,
+        g_field: Field,
+        dx: float,
+        dy: float,
+        *,
+        n_iters: int = 5,
+        dtau_factor: float = 0.3,
+    ) -> Field:
+        """
+        Sussman-type reinitialization.
+        Keeps the zero level set approximately fixed while driving |grad G| -> 1.
+        """
+        dtau = dtau_factor * min(dx, dy)
+        g0_field = g_field
+        g_re = g_field
+        for _ in range(n_iters):
+            g_re = self._reinitialize_step(g_re, g0_field, dtau, dx, dy)
+        return g_re
+
+
 def main():
     solver = GSolver()
     print("Initializing")
@@ -524,6 +579,70 @@ def main():
         fps=1,
     )
     print("Done")
+
+@dataclass
+class GridData:
+    x: np.ndarray
+    y: np.ndarray
+    nx: int
+    ny: int
+
+
+@dataclass
+class SnapshotData:
+    x: np.ndarray
+    y: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+    progress_var: np.ndarray
+    nx: int
+    ny: int
+
+class SnapshotLoader:
+    def __init__(self, case_name: str, base_dir: str = "data/fields/structured_grids"):
+        self.case_name = case_name
+        self.case_dir = Path(base_dir) / case_name
+        self.points_path = self.case_dir / "points.hdf5"
+
+    def load_grid(self) -> GridData:
+        with h5py.File(self.points_path, "r") as h5f:
+            nx = int(h5f.attrs["nx"])
+            ny = int(h5f.attrs["ny"])
+            x = np.asarray(h5f["x"][:, :, 0], dtype=np.float32)
+            y = np.asarray(h5f["y"][:, :, 0], dtype=np.float32)
+
+        return GridData(x=x, y=y, nx=nx, ny=ny)
+
+    def snapshot_path(self, snapshot: int) -> Path:
+        return self.case_dir / f"structured_fields{snapshot:05d}.hdf5"
+
+    def load_snapshot(self, snapshot: int) -> SnapshotData:
+        grid = self.load_grid()
+        field_path = self.snapshot_path(snapshot)
+
+        with h5py.File(field_path, "r") as h5f:
+            u = _reshape_field(h5f["u"][:], grid.nx, grid.ny)
+            v = _reshape_field(h5f["v"][:], grid.nx, grid.ny)
+            progress_var = _reshape_field(h5f["progress_var"][:], grid.nx, grid.ny)
+
+        return SnapshotData(
+            x=grid.x,
+            y=grid.y,
+            u=u,
+            v=v,
+            progress_var=progress_var,
+            nx=grid.nx,
+            ny=grid.ny,
+        )
+
+    def load_velocity(self, snapshot: int) -> tuple[np.ndarray, np.ndarray]:
+        snap = self.load_snapshot(snapshot)
+        return snap.u, snap.v
+
+    def load_progress_variable(self, snapshot: int) -> np.ndarray:
+        snap = self.load_snapshot(snapshot)
+        return snap.progress_var
+
 
 if __name__ == "__main__":
     main()
